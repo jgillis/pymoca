@@ -4132,6 +4132,46 @@ def test_for_array_with_outer_iterator_as_value(equation, expected, unroll_loops
     np.testing.assert_array_equal(_residuals(casadi_model, {"x": ca.DM([1, 2])}), expected)
 
 
+_BASEMODELICA_MODEL = """//! base 0.1.0
+package 'Tank'
+  model 'Tank'
+    parameter Real 'tank.area' = 2.0;
+    input Real 'q.in'(fixed = true);
+    Real 'tank.h[1]'(start = 1.0, fixed = true);
+    Real 'tank.h[2]';
+  equation
+    'tank.area' * der('tank.h[1]') = 'q.in';
+    'tank.h[2]' = 2.0 * 'tank.h[1]';
+  end 'Tank';
+end 'Tank';
+"""
+
+
+def test_basemodelica_names(tmp_path):
+    """Base Modelica option maps quoted names to plain ones and finds the wrapped model."""
+    (tmp_path / "Tank.basemodelica.mo").write_text(_BASEMODELICA_MODEL)
+    model = transfer_model(str(tmp_path), "Tank", {"basemodelica": True})
+
+    assert [v.symbol.name() for v in model.states] == ["tank.h[1]"]
+    assert [v.symbol.name() for v in model.alg_states] == ["tank.h[2]"]
+    assert [v.symbol.name() for v in model.inputs] == ["q.in"]
+    assert [p.symbol.name() for p in model.parameters] == ["tank.area"]
+    assert model.parameters[0].value == 2.0
+
+
+def test_basemodelica_files_skipped_without_option(tmp_path):
+    """Without the Base Modelica option, *.basemodelica.mo files in the model folder are skipped."""
+    (tmp_path / "Tank.basemodelica.mo").write_text("this is not parsed")
+    (tmp_path / "Plain.mo").write_text("model Plain Real x; equation x = 1; end Plain;")
+    model = transfer_model(str(tmp_path), "Plain", {})
+    assert [v.symbol.name() for v in model.alg_states] == ["x"]
+
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    with pytest.raises(FileNotFoundError, match="No \\*.basemodelica.mo files"):
+        transfer_model(str(empty), "Tank", {"basemodelica": True})
+
+
 if __name__ == "__main__":
     import pytest as _pytest
 
