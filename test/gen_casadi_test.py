@@ -3979,6 +3979,38 @@ def test_reduction_over_empty_range(op, expected, declarations):
     assert float(F(ca.DM([1, 2, 3]))) == expected
 
 
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        "parameter Real up = 10; parameter Real down = 32;",
+        "parameter Real up; parameter Real down;",
+    ],
+    ids=["with-values", "without-values"],
+)
+def test_subscripted_comprehension_in_binding(declarations):
+    """The form OpenModelica writes in a Base Modelica export of a scalarized array binding."""
+    txt = f"""
+        model ExportedBinding
+          {declarations}
+          parameter Real width = 0.5 * tan(
+            (0.017453292519943295 * {{up + (down - up) * (i - 1) / 11.0 for i in 1:12}})[12]
+          );
+          Real y(min = width);
+        equation
+          y = up;
+        end ExportedBinding;
+    """
+    casadi_model = gen_casadi.generate(parser.parse(txt), "ExportedBinding")
+    parameters = {p.symbol.name(): p for p in casadi_model.parameters}
+    F = ca.Function(
+        "f",
+        [parameters["up"].symbol, parameters["down"].symbol],
+        [ca.MX(parameters["width"].value)],
+    )
+    expected = 0.5 * np.tan(np.deg2rad(32.0))
+    assert float(F(10.0, 32.0)) == pytest.approx(expected, rel=1e-12)
+
+
 def test_for_equation_empty_range():
     """For-equation over an empty range with an indexed body compiles to no equations."""
     txt = """
@@ -3994,6 +4026,30 @@ def test_for_equation_empty_range():
     """
     casadi_model = gen_casadi.generate(parser.parse(txt), "ForEmpty")
     assert len(casadi_model.equations) == 1
+
+
+def test_subscripted_expression():
+    """Subscripts of array comprehensions, array literals and array expressions compile."""
+    txt = """
+        model Subscripted
+          parameter Real a = 2;
+          parameter Real x = ({a * i for i in 1:3})[2];
+          parameter Real y = ({1, 2, 3})[3];
+          parameter Real z = (0.5 * {a * i for i in 1:3})[1];
+          Real w;
+        equation
+          w = ({a * i for i in 1:3})[3];
+        end Subscripted;
+    """
+    casadi_model = gen_casadi.generate(parser.parse(txt), "Subscripted")
+    parameters = {p.symbol.name(): p for p in casadi_model.parameters}
+    a = parameters["a"].symbol
+    F = ca.Function("f", [a], [parameters[n].value for n in ("x", "y", "z")])
+    assert [float(v) for v in F(2.0)] == [4.0, 3.0, 1.0]
+
+    w = next(v.symbol for v in casadi_model.alg_states if v.symbol.name() == "w")
+    residual = ca.Function("r", [w, a], [casadi_model.equations[0]])
+    assert float(residual(6.0, 2.0)) == 0.0
 
 
 @pytest.mark.parametrize("unroll_loops", [False, True])
