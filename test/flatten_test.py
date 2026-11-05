@@ -2250,6 +2250,30 @@ def test_for_array_if_expression_range_not_unrolled():
     assert isinstance(flat.symbols["a"].min, ast.ForArray)
 
 
+def test_for_array_unknown_name_as_range_not_unrolled():
+    """A range bound that is a name without a value here is kept as is, not rejected."""
+    flat = _flatten_inline(
+        """
+    model M
+        Real a[2](min = {i for i in 1:n});
+    end M;""",
+        "M",
+    )
+    assert isinstance(flat.symbols["a"].min, ast.ForArray)
+
+
+def test_for_array_zero_step():
+    """A range with a zero step has no defined elements (MLS 10.4.3)."""
+    with pytest.raises(tree.ModelicaSemanticError, match="step must not be zero"):
+        _flatten_inline(
+            """
+    model M
+        Real a[2](min = {i for i in 1:0:3});
+    end M;""",
+            "M",
+        )
+
+
 def test_for_array_unsupported_range():
     """An implicit or array-valued iterator range is reported as unsupported (MLS 10.4.1)."""
     for range_ in ("", " in k"):

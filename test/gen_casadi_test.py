@@ -3541,6 +3541,32 @@ def test_for_array_range_declared_later(unroll_loops):
 
 
 @pytest.mark.parametrize("unroll_loops", [False, True])
+@pytest.mark.parametrize(
+    "slice_, expected",
+    [("A[i, :]", [3, 7]), ("A[:, i]", [4, 6])],
+    ids=["row", "column"],
+)
+def test_for_array_of_matrix_slice(slice_, expected, unroll_loops):
+    """The body of a comprehension may slice a matrix along either dimension."""
+    txt = f"""
+        model ForArraySlice
+          parameter Real A[2, 2];
+          Real y[2];
+        equation
+          y = {{sum({slice_}) for i in 1:2}};
+        end ForArraySlice;
+    """
+    casadi_model = gen_casadi.generate(
+        parser.parse(txt), "ForArraySlice", {"unroll_loops": unroll_loops}
+    )
+    y = next(v for v in casadi_model.alg_states if v.symbol.name() == "y")
+    A = next(p for p in casadi_model.parameters if p.symbol.name() == "A")
+    F = ca.Function("f", [y.symbol, A.symbol], [casadi_model.equations[0]])
+    residual = F(ca.DM.zeros(2), ca.DM([[1, 2], [3, 4]]))
+    np.testing.assert_array_equal(np.array(residual).flatten(), -np.array(expected))
+
+
+@pytest.mark.parametrize("unroll_loops", [False, True])
 def test_for_array_in_equation(unroll_loops):
     """Array comprehension in an equation, which flattening does not unroll, compiles."""
     txt = """
@@ -3573,6 +3599,7 @@ def test_for_array_in_equation(unroll_loops):
         ("2 * {x[i] for i in 1:3}", [2, 4, 6]),
         ("{x[i] for i in 1:3} + {i for i in 1:3}", [2, 4, 6]),
         ("{i for i in 1:3} .* {x[i] for i in 1:3}", [1, 4, 9]),
+        ("fmax({x[1], x[2], x[3]}, {2, 2, 2})", [2, 2, 3]),
     ],
 )
 def test_array_literal_in_arithmetic(expression, expected):
