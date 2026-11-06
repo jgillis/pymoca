@@ -408,8 +408,8 @@ def _resolve_modification_attribute(
     value = mod.modifications[0]
     assert not isinstance(value, ast.ClassModification)
     mod_scope = arg.scope if isinstance(arg.scope, InstanceClass) else symbol.parent_instance
-    if isinstance(mod_scope, InstanceClass):
-        value = _expand_for_arrays(value, mod_scope, ctx)
+    assert isinstance(mod_scope, InstanceClass)
+    value = _expand_for_arrays(value, mod_scope, ctx)
     if isinstance(value, ast.Primary):
         value = value.value
     elif isinstance(value, ast.ComponentRef):
@@ -444,10 +444,9 @@ def _resolve_modification_attribute(
                 value = const_val.value
     elif isinstance(value, (ast.Array, ast.Expression, ast.ForArray)):
         # Discover function calls so the function flattening pass emits them.
-        if isinstance(mod_scope, InstanceClass):
-            func_resolver = _FunctionCallResolver(mod_scope, ctx.flat_class.functions)
-            walker = TreeWalker()
-            walker.walk(func_resolver, value)
+        func_resolver = _FunctionCallResolver(mod_scope, ctx.flat_class.functions)
+        walker = TreeWalker()
+        walker.walk(func_resolver, value)
     if isinstance(value, ast.Expression):
         expr_scope = arg.scope if isinstance(arg.scope, InstanceClass) else symbol.parent_instance
         expr_flat_class = symbol.parent_instance
