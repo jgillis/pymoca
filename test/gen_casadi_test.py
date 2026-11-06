@@ -8,6 +8,7 @@ import os
 import pickle
 import re
 import shutil
+import sys
 import tempfile
 
 import casadi as ca
@@ -3334,6 +3335,414 @@ def test_function_dedup_name_dot_free():
     assert list(generator.functions.keys()) == ["Branch.f"]
     (func,) = generator.functions.values()
     assert func.name() == "Branch_f"
+
+
+def test_array_of_component_refs_in_modification():
+    """Array literal elements that are component references compile (issue #353)."""
+    txt = """
+        model ArrayOfRefs
+          parameter Real x[2] = {1, 2};
+          Real y[2](min = {x[1], x[2]});
+        equation
+          y = x;
+        end ArrayOfRefs;
+    """
+    ast_tree = parser.parse(txt)
+    casadi_model = gen_casadi.generate(ast_tree, "ArrayOfRefs")
+
+    y = next(v for v in casadi_model.alg_states if v.symbol.name() == "y")
+    x = next(p for p in casadi_model.parameters if p.symbol.name() == "x")
+    F = ca.Function("f", [x.symbol], [ca.vertcat(*y.min)])
+    np.testing.assert_array_equal(np.array(F(ca.DM([3, 4]))).flatten(), [3.0, 4.0])
+
+
+def test_for_array_in_modification():
+    """Array comprehension {expr for i in range} in a modification compiles (issue #353)."""
+    with open(os.path.join(MODEL_DIR, "ForArrayModification.mo"), "r") as f:
+        txt = f.read()
+    ast_tree = parser.parse(txt)
+    casadi_model = gen_casadi.generate(ast_tree, "ForArrayModification")
+
+    H_var = next(v for v in casadi_model.alg_states if v.symbol.name().startswith("H"))
+    H_b = next(p for p in casadi_model.parameters if p.symbol.name().startswith("H_b"))
+
+    # min has 5 elements: 1 from first literal array, 3 from comprehension, 1 from last
+    min_expr = H_var.min
+    assert min_expr.shape == (5, 1)
+
+    H_b_vals = np.array([0.0, 1.0, 2.0, 3.0, 4.0])
+    F = ca.Function("f", [H_b.symbol], [min_expr])
+    result = np.array(F(ca.DM(H_b_vals))).flatten()
+
+    expected = [max(H_b_vals[:2]), *(max(H_b_vals[i : i + 3]) for i in range(3)), max(H_b_vals[3:])]
+    np.testing.assert_array_equal(result, expected)
+
+
+def test_sum_of_array_literal():
+    """sum() of an array literal reduces its elements (MLS 10.3.4)."""
+    ast_tree = parser.parse(
+        """
+    model SumLiteral
+        parameter Real x[3] = {1, 2, 3};
+        Real y(min = sum({x[1], 2 * x[2], x[3]}));
+    equation
+        y = x[1];
+    end SumLiteral;"""
+    )
+    casadi_model = gen_casadi.generate(ast_tree, "SumLiteral")
+
+    y = next(v for v in casadi_model.alg_states if v.symbol.name() == "y")
+    x = next(p for p in casadi_model.parameters if p.symbol.name() == "x")
+    F = ca.Function("f", [x.symbol], [y.min])
+    assert float(F(ca.DM([1, 2, 3]))) == 8.0
+
+
+def test_reduction_in_modification():
+    """A reduction sum(expr for i in range) in a modification compiles (MLS 10.3.4.1)."""
+    ast_tree = parser.parse(
+        """
+    model ReductionModification
+        parameter Real x[3] = {1, 2, 3};
+        Real y(min = sum(x[i] ^ 2 for i in 1:3));
+    equation
+        y = x[1];
+    end ReductionModification;"""
+    )
+    casadi_model = gen_casadi.generate(ast_tree, "ReductionModification")
+
+    y = next(v for v in casadi_model.alg_states if v.symbol.name() == "y")
+    x = next(p for p in casadi_model.parameters if p.symbol.name() == "x")
+    F = ca.Function("f", [x.symbol], [y.min])
+    assert float(F(ca.DM([1, 2, 3]))) == 14.0
+
+
+def test_min_max_product_of_array():
+    """min, max and product of a reduction or array literal compile to scalars (MLS 10.3.4)."""
+    ast_tree = parser.parse(
+        """
+    model ArrayReductions
+        parameter Real x[3] = {1, 2, 3};
+        Real a(min = min(x[i] for i in 1:3));
+        Real b(min = max(x[i] for i in 1:3));
+        Real c(min = product(x[i] for i in 1:3));
+        Real d(min = min({x[2], x[3]}));
+    equation
+        a = x[1];
+        b = x[1];
+        c = x[1];
+        d = x[1];
+    end ArrayReductions;"""
+    )
+    casadi_model = gen_casadi.generate(ast_tree, "ArrayReductions")
+
+    states = {v.symbol.name(): v for v in casadi_model.alg_states}
+    x = next(p for p in casadi_model.parameters if p.symbol.name() == "x")
+    F = ca.Function("f", [x.symbol], [states[n].min for n in ("a", "b", "c", "d")])
+    assert [float(v) for v in F(ca.DM([1, 2, 3]))] == [1.0, 3.0, 6.0, 2.0]
+
+
+def _max_of_neighbors(H_b):
+    n = len(H_b)
+    return [max(H_b[:2]), *(max(H_b[i : i + 3]) for i in range(n - 2)), max(H_b[n - 2 :])]
+
+
+@pytest.mark.parametrize("unroll_loops", [False, True])
+def test_for_array_with_modified_range(unroll_loops):
+    """Array comprehension with a range set by a component modification compiles."""
+    with open(os.path.join(MODEL_DIR, "ForArrayModifiedRange.mo"), "r") as f:
+        txt = f.read()
+    ast_tree = parser.parse(txt)
+    casadi_model = gen_casadi.generate(
+        ast_tree, "ForArrayModifiedRange", {"unroll_loops": unroll_loops}
+    )
+    states = {v.symbol.name(): v for v in casadi_model.alg_states}
+    parameters = {p.symbol.name(): p for p in casadi_model.parameters}
+
+    # c2 keeps the default n = 2, so its comprehension over 1:0 is empty
+    for comp, H_b_vals, p_val in (("c", [0, 3, 1, 4, 2], 2.0), ("c2", [1, 0], 1.0)):
+        H = states[f"{comp}.H"]
+        H_b = parameters[f"{comp}.H_b"]
+        p = parameters[f"{comp}.p"]
+        assert H.min.shape == (len(H_b_vals), 1)
+
+        # The comprehension over 1:n is unrolled while flattening, so nominal is a list
+        F = ca.Function("f", [H_b.symbol, p.symbol], [H.min, ca.vertcat(*H.nominal)])
+        min_val, nominal_val = F(ca.DM(H_b_vals), p_val)
+        np.testing.assert_array_equal(
+            np.array(min_val).flatten(), _max_of_neighbors(np.array(H_b_vals, dtype=float))
+        )
+        np.testing.assert_array_equal(
+            np.array(nominal_val).flatten(), p_val * np.arange(1, len(H_b_vals) + 1)
+        )
+
+
+@pytest.mark.parametrize("unroll_loops", [False, True])
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        "parameter Integer n = 3; Real h[3](min = {b[i] for i in 1:n});",
+        "Real h[3](min = {b[i] for i in 1:n}); parameter Integer n = 3;",
+        "parameter Integer m = 3; parameter Integer n = m; Real h[3](min = {b[i] for i in 1:n});",
+    ],
+    ids=["declared-before", "declared-after", "bound-to-parameter"],
+)
+def test_for_array_of_component_ref(declarations, unroll_loops):
+    """A comprehension whose body is a bare component reference compiles, however n is given."""
+    txt = f"""
+        model ForArrayBare
+          parameter Real b[3];
+          {declarations}
+        equation
+          h = b;
+        end ForArrayBare;
+    """
+    casadi_model = gen_casadi.generate(
+        parser.parse(txt), "ForArrayBare", {"unroll_loops": unroll_loops}
+    )
+    h = next(v for v in casadi_model.alg_states if v.symbol.name() == "h")
+    b = next(p for p in casadi_model.parameters if p.symbol.name() == "b")
+
+    h_min = ca.vertcat(*h.min) if isinstance(h.min, list) else h.min
+    F = ca.Function("f", [b.symbol], [h_min])
+    np.testing.assert_array_equal(np.array(F(ca.DM([1, 2, 3]))).flatten(), [1.0, 2.0, 3.0])
+
+
+@pytest.mark.parametrize("unroll_loops", [False, True])
+def test_for_array_range_declared_later(unroll_loops):
+    """A range parameter declared after its use, in an inherited class, as in the channel-flow library."""
+    txt = """
+        model ForArrayLater
+          partial model Base
+            parameter Real H_b[n_level_nodes];
+            Real H[n_level_nodes](
+              min = cat(
+                1,
+                {max(H_b[1], H_b[2])},
+                {max(H_b[i], max(H_b[i + 1], H_b[i + 2])) for i in 1:n_level_nodes - 2},
+                {max(H_b[n_level_nodes - 1], H_b[n_level_nodes])}
+              )
+            );
+            parameter Integer n_level_nodes = 2;
+          equation
+            H = H_b;
+          end Base;
+          model Channel
+            extends Base;
+          end Channel;
+          Channel c(n_level_nodes = 5, H_b = {0, 3, 1, 4, 2});
+          Channel c2(H_b = {1, 0});
+        end ForArrayLater;
+    """
+    casadi_model = gen_casadi.generate(
+        parser.parse(txt), "ForArrayLater", {"unroll_loops": unroll_loops}
+    )
+    states = {v.symbol.name(): v for v in casadi_model.alg_states}
+    parameters = {p.symbol.name(): p for p in casadi_model.parameters}
+    for comp, H_b_vals in (("c", [0, 3, 1, 4, 2]), ("c2", [1, 0])):
+        H_min = states[f"{comp}.H"].min
+        F = ca.Function("f", [parameters[f"{comp}.H_b"].symbol], [H_min])
+        np.testing.assert_array_equal(
+            np.array(F(ca.DM(H_b_vals))).flatten(),
+            _max_of_neighbors(np.array(H_b_vals, dtype=float)),
+        )
+
+
+@pytest.mark.parametrize("unroll_loops", [False, True])
+@pytest.mark.parametrize(
+    "slice_, expected",
+    [("A[i, :]", [3, 7]), ("A[:, i]", [4, 6])],
+    ids=["row", "column"],
+)
+def test_for_array_of_matrix_slice(slice_, expected, unroll_loops):
+    """The body of a comprehension may slice a matrix along either dimension."""
+    txt = f"""
+        model ForArraySlice
+          parameter Real A[2, 2];
+          Real y[2];
+        equation
+          y = {{sum({slice_}) for i in 1:2}};
+        end ForArraySlice;
+    """
+    casadi_model = gen_casadi.generate(
+        parser.parse(txt), "ForArraySlice", {"unroll_loops": unroll_loops}
+    )
+    y = next(v for v in casadi_model.alg_states if v.symbol.name() == "y")
+    A = next(p for p in casadi_model.parameters if p.symbol.name() == "A")
+    F = ca.Function("f", [y.symbol, A.symbol], [casadi_model.equations[0]])
+    residual = F(ca.DM.zeros(2), ca.DM([[1, 2], [3, 4]]))
+    np.testing.assert_array_equal(np.array(residual).flatten(), -np.array(expected))
+
+
+@pytest.mark.parametrize("unroll_loops", [False, True])
+def test_for_array_in_equation(unroll_loops):
+    """Array comprehension in an equation, which flattening does not unroll, compiles."""
+    txt = """
+        model ForArrayEquation
+          parameter Real x[3];
+          Real y[3];
+        equation
+          y = {2 * x[i] for i in 1:3};
+        end ForArrayEquation;
+    """
+    casadi_model = gen_casadi.generate(
+        parser.parse(txt), "ForArrayEquation", {"unroll_loops": unroll_loops}
+    )
+    y = next(v for v in casadi_model.alg_states if v.symbol.name() == "y")
+    x = next(p for p in casadi_model.parameters if p.symbol.name() == "x")
+
+    F = ca.Function("f", [y.symbol, x.symbol], [casadi_model.equations[0]])
+    residual = F(ca.DM([1, 1, 1]), ca.DM([1, 2, 3]))
+    np.testing.assert_array_equal(np.array(residual).flatten(), [-1.0, -3.0, -5.0])
+
+
+@pytest.mark.parametrize(
+    "expression, expected",
+    [
+        ("2 * {x[1], x[2], x[3]}", [2, 4, 6]),
+        ("{x[1], x[2], x[3]} / 2", [0.5, 1, 1.5]),
+        ("{x[1], x[2], x[3]} + {1, 2, 3}", [2, 4, 6]),
+        ("-{x[1], x[2], x[3]}", [-1, -2, -3]),
+        ("sin({0 * x[1], 0 * x[2], 0 * x[3]})", [0, 0, 0]),
+        ("2 * {x[i] for i in 1:3}", [2, 4, 6]),
+        ("{x[i] for i in 1:3} + {i for i in 1:3}", [2, 4, 6]),
+        ("{i for i in 1:3} .* {x[i] for i in 1:3}", [1, 4, 9]),
+        ("fmax({x[1], x[2], x[3]}, {2, 2, 2})", [2, 2, 3]),
+    ],
+)
+def test_array_literal_in_arithmetic(expression, expected):
+    """Array literals and unrolled comprehensions are operands like any other array."""
+    txt = f"""
+        model ArrayArithmetic
+          parameter Real x[3];
+          Real y[3](min = {expression});
+        equation
+          y = x;
+        end ArrayArithmetic;
+    """
+    casadi_model = gen_casadi.generate(parser.parse(txt), "ArrayArithmetic")
+    y = next(v for v in casadi_model.alg_states if v.symbol.name() == "y")
+    x = next(p for p in casadi_model.parameters if p.symbol.name() == "x")
+    F = ca.Function("f", [x.symbol], [ca.MX(y.min)])
+    np.testing.assert_allclose(np.array(F(ca.DM([1, 2, 3]))).flatten(), expected)
+
+
+def test_matrix_literal_in_arithmetic():
+    """A nested array literal is a matrix: its inner arrays are the rows."""
+    txt = """
+        model MatrixArithmetic
+          parameter Real x[2];
+          Real y[2, 2](min = 2 * {{x[1], x[2]}, {3, 4}});
+        equation
+          y = fill(0.0, 2, 2);
+        end MatrixArithmetic;
+    """
+    casadi_model = gen_casadi.generate(parser.parse(txt), "MatrixArithmetic")
+    y = next(v for v in casadi_model.alg_states if v.symbol.name() == "y")
+    x = next(p for p in casadi_model.parameters if p.symbol.name() == "x")
+    F = ca.Function("f", [x.symbol], [ca.MX(y.min)])
+    np.testing.assert_array_equal(np.array(F(ca.DM([1, 2]))), [[2, 4], [6, 8]])
+
+
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        "parameter Integer n = 0; Real y(min = OP(x[i] for i in 1:n));",
+        "Real y(min = OP(x[i] for i in 1:n)); parameter Integer n = 0;",
+    ],
+    ids=["unrolled", "not-unrolled"],
+)
+@pytest.mark.parametrize(
+    "op, expected",
+    [("sum", 0.0), ("product", 1.0), ("min", sys.float_info.max), ("max", -sys.float_info.max)],
+)
+def test_reduction_over_empty_range(op, expected, declarations):
+    """A reduction over an empty range gives the result of MLS 3.7, table 10.3."""
+    txt = f"""
+        model EmptyReduction
+          parameter Real x[3];
+          {declarations.replace("OP", op)}
+        equation
+          y = x[1];
+        end EmptyReduction;
+    """
+    casadi_model = gen_casadi.generate(parser.parse(txt), "EmptyReduction")
+    y = next(v for v in casadi_model.alg_states if v.symbol.name() == "y")
+    x = next(p for p in casadi_model.parameters if p.symbol.name() == "x")
+    F = ca.Function("f", [x.symbol], [ca.MX(y.min)])
+    assert float(F(ca.DM([1, 2, 3]))) == expected
+
+
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        "parameter Real up = 10; parameter Real down = 32;",
+        "parameter Real up; parameter Real down;",
+    ],
+    ids=["with-values", "without-values"],
+)
+def test_subscripted_comprehension_in_binding(declarations):
+    """The form OpenModelica writes in a Base Modelica export of a scalarized array binding."""
+    txt = f"""
+        model ExportedBinding
+          {declarations}
+          parameter Real width = 0.5 * tan(
+            (0.017453292519943295 * {{up + (down - up) * (i - 1) / 11.0 for i in 1:12}})[12]
+          );
+          Real y(min = width);
+        equation
+          y = up;
+        end ExportedBinding;
+    """
+    casadi_model = gen_casadi.generate(parser.parse(txt), "ExportedBinding")
+    parameters = {p.symbol.name(): p for p in casadi_model.parameters}
+    F = ca.Function(
+        "f",
+        [parameters["up"].symbol, parameters["down"].symbol],
+        [ca.MX(parameters["width"].value)],
+    )
+    expected = 0.5 * np.tan(np.deg2rad(32.0))
+    assert float(F(10.0, 32.0)) == pytest.approx(expected, rel=1e-12)
+
+
+def test_for_equation_empty_range():
+    """For-equation over an empty range with an indexed body compiles to no equations."""
+    txt = """
+        model ForEmpty
+          parameter Integer n = 1;
+          Real x[2];
+        equation
+          for i in 1:n - 1 loop
+            x[i + 1] = x[i];
+          end for;
+          x = {1, 2};
+        end ForEmpty;
+    """
+    casadi_model = gen_casadi.generate(parser.parse(txt), "ForEmpty")
+    assert len(casadi_model.equations) == 1
+
+
+def test_subscripted_expression():
+    """Subscripts of array comprehensions, array literals and array expressions compile."""
+    txt = """
+        model Subscripted
+          parameter Real a = 2;
+          parameter Real x = ({a * i for i in 1:3})[2];
+          parameter Real y = ({1, 2, 3})[3];
+          parameter Real z = (0.5 * {a * i for i in 1:3})[1];
+          Real w;
+        equation
+          w = ({a * i for i in 1:3})[3];
+        end Subscripted;
+    """
+    casadi_model = gen_casadi.generate(parser.parse(txt), "Subscripted")
+    parameters = {p.symbol.name(): p for p in casadi_model.parameters}
+    a = parameters["a"].symbol
+    F = ca.Function("f", [a], [parameters[n].value for n in ("x", "y", "z")])
+    assert [float(v) for v in F(2.0)] == [4.0, 3.0, 1.0]
+
+    w = next(v.symbol for v in casadi_model.alg_states if v.symbol.name() == "w")
+    residual = ca.Function("r", [w, a], [casadi_model.equations[0]])
+    assert float(residual(6.0, 2.0)) == 0.0
 
 
 if __name__ == "__main__":

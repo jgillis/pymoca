@@ -31,6 +31,7 @@ __all__ = [
     "EquationSection",
     "Expression",
     "ExtendsClause",
+    "ForArray",
     "ForEquation",
     "ForIndex",
     "ForStatement",
@@ -159,7 +160,7 @@ class Primary(Node):
 
 class Array(Node):
     def __init__(self, **kwargs):
-        self.values: list[Expression | Primary | ComponentRef | Array] = []
+        self.values: list[Expression | Primary | ComponentRef | Array | ForArray] = []
         super().__init__(**kwargs)
 
     def __repr__(self):
@@ -267,7 +268,9 @@ class ComponentRef(Node):
 class Expression(Node):
     def __init__(self, **kwargs):
         self.operator: str | ComponentRef | None = None
-        self.operands: list[Expression | Primary | ComponentRef | Array | IfExpression] = []
+        self.operands: list[
+            Expression | Primary | ComponentRef | Array | IfExpression | ForArray
+        ] = []
         super().__init__(**kwargs)
 
     def __repr__(self):
@@ -351,6 +354,32 @@ class ForEquation(Node):
     def __repr__(self):
         return "{}(indices={!r}, equations={!r})".format(
             type(self).__name__, self.indices, self.equations
+        )
+
+
+class ForArray(Node):
+    def __init__(self, **kwargs):
+        self.indices: list[ForIndex] = []
+        self.expression: Expression | Primary | ComponentRef | Array | IfExpression | None = None
+        super().__init__(**kwargs)
+
+    def __repr__(self):
+        return "{}(indices={!r}, expression={!r})".format(
+            type(self).__name__, self.indices, self.expression
+        )
+
+
+class IndexedExpression(Node):
+    def __init__(self, **kwargs):
+        self.expression: (
+            Expression | Primary | ComponentRef | Array | IfExpression | ForArray | None
+        ) = None
+        self.indices: list[Expression | Primary | ComponentRef | Slice] = []
+        super().__init__(**kwargs)
+
+    def __repr__(self):
+        return "{}(expression={!r}, indices={!r})".format(
+            type(self).__name__, self.expression, self.indices
         )
 
 
@@ -595,7 +624,7 @@ class ElementModification(Node):
     def __init__(self, **kwargs):
         self.component: ComponentRef = ComponentRef()
         self.modifications: list[
-            Primary | Expression | ClassModification | Array | ComponentRef
+            Primary | Expression | ClassModification | Array | ComponentRef | ForArray
         ] = []
         super().__init__(**kwargs)
 
