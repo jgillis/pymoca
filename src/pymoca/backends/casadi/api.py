@@ -533,8 +533,9 @@ def transfer_model(model_folder: str, model_name: str, compiler_options=None):
         cache = compiler_options["cache"] = False
 
     if cache or codegen:
-        # Until CasADi supports pickling MXFunctions, caching implies
-        # expanding to SX. We only raise a warning when we have to (re)compile
+        # Caching expands to SX. CasADi could not pickle MX Functions when
+        # this was written; it can now, so this is a choice rather than a
+        # requirement. We only raise a warning when we have to (re)compile
         # the model though.
         raise_expand_warning = False
         if cache and not compiler_options["expand_mx"]:
